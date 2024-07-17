@@ -1,0 +1,766 @@
+class InstagramFeed extends HTMLElement {
+  constructor() {
+    super();
+
+    this.apiHost = 'https://d3ejra0xbg20rg.cloudfront.net';
+    this.settings = JSON.parse(this.getAttribute('data-section-settings'));
+  }
+
+  connectedCallback() {
+    this.initSection();
+  }
+
+  async initSection() {
+    let template = this.querySelector('[data-media-template]');
+
+    if (!template) {
+      console.warn('No template has been provided. Make sure that you have added the "data-media-template" attribute to the "template" element');
+      return;
+    }
+
+    // We can inject the theme specific styles as soon as possible
+    this.injectThemeStyles();
+
+    // Get the media
+    let media = [];
+
+    try {
+      media = await this.loadMedia();
+    } catch (exception) {
+      if (Shopify.designMode) {
+        this.querySelector('.ooo-instagram-feed__list').outerHTML = `
+          <p style="padding: 10px; background: #ef4c4c; color: #ffffff; text-align: center;">${exception}</p>
+        `;
+      } else {
+        this.parentElement.style.display = 'none';
+        console.warn('An error occurred while retrieving images from Instagram. The section has been hidden.');
+      }
+
+      return;
+    }
+
+    // We remove all the placeholders we have, that were here to allocate the space
+    this.removePlaceholders();
+
+    // And inject them
+    this.buildTemplateFromMedia(template, media);
+  }
+
+  async loadMedia() {
+    // If the media have not been loaded yet, we load them from our server
+    let response = await fetch(`${this.apiHost}/instagram/media?shop=${Shopify.shop}&resource=default`);
+
+    if (!response.ok) {
+      let error = await response.json();
+      throw error['message'] || 'An unexpected error occurred.';
+    }
+
+    let media = await response.json(),
+      slicedMedia = media.slice(0, this.settings['imageCount'] || 12);
+
+    if (slicedMedia.length === 0) {
+      throw 'No images could be retrieved from Instagram. Make sure your Instagram account contains at least 1 image.';
+    }
+
+    // If we are using the "sliding carousel" mode, we need to have exactly 30 images, so we duplicate them until
+    // we have enough number
+    if (this.settings['layout'] === 'sliding_carousel') {
+      do {
+        slicedMedia.push(...slicedMedia);
+      } while (slicedMedia.length < 30);
+
+      slicedMedia = slicedMedia.slice(0, 30);
+    }
+
+    return slicedMedia;
+  }
+
+  removePlaceholders() {
+    let placeholderMedia = this.querySelectorAll('[data-media-placeholder]');
+    for (let i = 0 ; i < placeholderMedia.length ; ++i) {
+      placeholderMedia[i].remove();
+    }
+  }
+
+  buildTemplateFromMedia(template, media) {
+    let mediaFragment = document.createDocumentFragment(),
+      dateFormatter = new Intl.DateTimeFormat(this.settings['locale'], {year: 'numeric', month: 'long', day: 'numeric'});
+
+    media.forEach((singleMedia) => {
+      let cloneMedia = document.importNode(template.content, true);
+
+      // For the timestamp, Instagram returns a timestamp so we convert it to a human readable sentence.
+      let formattedTimestamp = singleMedia['timestamp'].split('T')[0];
+      let formattedDate = dateFormatter.format(new Date(formattedTimestamp));
+
+      // For the media URL, we use thumbnail if it is a video
+      let mediaUrl = (singleMedia['media_type'] === 'VIDEO') ? singleMedia['thumbnail_url'] : singleMedia['media_url'];
+
+      this.setValueForField(cloneMedia.querySelector('[data-instagram-field="media_url"]'), mediaUrl, 'src');
+      this.setValueForField(cloneMedia.querySelector('[data-instagram-field="username"]'), singleMedia['username'], 'text');
+      this.setValueForField(cloneMedia.querySelector('[data-instagram-field="caption"]'), singleMedia['caption'], 'text');
+      this.setValueForField(cloneMedia.querySelector('[data-instagram-field="permalink"]'), singleMedia['permalink'], 'href');
+      this.setValueForField(cloneMedia.querySelector('[data-instagram-field="timestamp"]'), formattedDate, 'text');
+
+      mediaFragment.appendChild(cloneMedia);
+    });
+
+    template.parentElement.appendChild(mediaFragment);
+    template.remove(); // We can remove the template, so that it does not mess with nth-child
+  }
+
+  setValueForField(field, value, valueType) {
+    if (!field) {
+      return; // Do nothing if the field does not exist
+    }
+
+    // If the field exist, but the value is undefined, we remove it
+    if (undefined === value) {
+      field.remove();
+    }
+
+    // Otherwise, we set the value
+    switch(valueType) {
+      case 'src':
+      case 'href':
+        field.setAttribute(valueType, value);
+        break;
+
+      case 'text':
+        field.textContent = value;
+        break;
+    }
+  }
+
+  /**
+   * In order to seamlessly integrate with themes, we detect the theme and try to inject
+   * CSS styles that will match the theme
+   */
+  async injectThemeStyles() {
+    let theme = {};
+
+    if (window.BOOMR !== undefined) {
+      theme = {
+        name: window.BOOMR.themeName,
+        version: window.BOOMR.themeVersion
+      };
+    } else {
+      theme = await this.detectTheme();
+    }
+
+    if (!theme || (window['AppSectionFeed'] && !window['AppSectionFeed']['injectThemeStyles'])) {
+      return; // If we cannot find any theme or that the merchant explicitly disable the theme style injection, we return
+    }
+
+    // Get the theme info
+    const themeName = (theme['name'] || '').toLowerCase(),
+      themeVersion = (parseInt(theme['version'] || 1));
+
+    // We get the element that we tend to change
+    let header = this.querySelector('.ooo-instagram-header'),
+      heading = this.querySelector('.ooo-instagram-header__title'),
+      subheading = this.querySelector('.ooo-instagram-header__subheading'),
+      button = this.querySelector('.ooo-instagram-footer__button');
+
+    let headingClassName = '',
+      subheadingClassName = '',
+      buttonClassName = '';
+
+    switch (themeName) {
+      case 'warehouse':
+        headingClassName = 'heading h3';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button button--primary';
+        break;
+
+      case 'prestige':
+        if (themeVersion >= 7) {
+          this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+          this.style.setProperty('--ooo-instagram-header-margin-bottom', 'var(--section-stack-gap, 0px)');
+
+          header.classList.add('prose');
+          headingClassName = 'h2';
+          subheadingClassName = '';
+          buttonClassName = 'button';
+        } else {
+          this.parentElement.classList.add('shopify-section--bordered');
+          this.style.setProperty('--ooo-instagram-section-vertical-margin', 0);
+          this.style.setProperty('--ooo-instagram-section-vertical-padding', (window.innerWidth <= 768 ? '50px' : '80px'));
+          this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '24px' : '80px'));
+          this.style.setProperty('--ooo-instagram-header-margin-bottom', '30px');
+          this.style.setProperty('--ooo-instagram-footer-margin-top', '40px');
+
+          headingClassName = 'Heading u-h1';
+          subheadingClassName = 'Rte';
+          buttonClassName = 'Button Button--primary';
+        }
+
+        break;
+
+      case 'focal':
+        if (themeVersion >= 8) {
+          this.style.setProperty('--ooo-instagram-section-vertical-margin', 'var(--vertical-breather)');
+          this.style.setProperty('--ooo-instagram-header-margin-bottom', '28px');
+
+          headingClassName = 'heading h2';
+          subheadingClassName = 'rte';
+          buttonClassName = 'button button--primary';
+        }
+
+        break;
+
+      case 'impact':
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-header-margin-bottom', 'var(--section-stack-spacing-block, 0px)');
+
+        header.classList.add('prose');
+        headingClassName = 'h2';
+        subheadingClassName = '';
+        buttonClassName = 'button button--xl';
+
+        break;
+
+      case 'impulse':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1500px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', (window.innerWidth <= 768 ? '40px' : '75px'));
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '17px' : '40px'));
+
+        headingClassName = 'h2';
+        subheadingClassName = 'rte';
+        buttonClassName = 'btn';
+        break;
+
+      case 'streamline':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1300px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', (window.innerWidth <= 768 ? '60px' : '120px'));
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '30px' : '40px'));
+
+        headingClassName = 'section-header__title';
+        subheadingClassName = 'rte section-header__description';
+        buttonClassName = 'btn';
+        break;
+
+      case 'motion':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1300px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', (window.innerWidth <= 768 ? '34px' : '100px'));
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '20px' : '40px'));
+
+        headingClassName = 'h1';
+        subheadingClassName = 'rte';
+        buttonClassName = 'btn';
+        break;
+
+      case 'flow':
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', 0);
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', '50px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '15px' : '30px'));
+
+        headingClassName = 'page--title';
+        subheadingClassName = 'rte';
+        buttonClassName = 'btn';
+        break;
+
+      case 'envy':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1170px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', 0);
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', '30px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '15px');
+        this.style.setProperty('--ooo-instagram-footer-margin-top', 0);
+
+        headingClassName = '';
+        subheadingClassName = 'rte';
+        buttonClassName = 'btn btn-custom';
+        break;
+
+      case 'capital':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1140px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '40px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '20px');
+
+        headingClassName = 'featured-content--header';
+        subheadingClassName = 'featured-content--rich-content';
+        buttonClassName = 'button';
+        break;
+
+      case 'district':
+        this.parentElement.classList.add('section-standard');
+        this.style.setProperty('--ooo-instagram-container-max-width', '1180px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', 0);
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', '40px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '20px');
+
+        headingClassName = 'h2';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button large outline';
+        break;
+
+      case 'blockshop':
+        this.parentElement.classList.add('section-standard');
+        this.style.setProperty('--ooo-instagram-container-max-width', '1200px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', 0);
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', (window.innerWidth <= 768 ? '32px' : '72px'));
+        this.style.setProperty('--ooo-instagram-external-gutter', '16px');
+
+        headingClassName = 'font--section-heading';
+        subheadingClassName = 'rte-content';
+        buttonClassName = 'font--button';
+        break;
+
+      case 'icon':
+        headingClassName = '';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button';
+        break;
+
+      case 'venue':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1600px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', (window.innerWidth <= 768 ? '30px' : '42px'));
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 980 ? '18px' : '30px'));
+
+        headingClassName = 'section__title-text';
+        subheadingClassName = 'rte';
+        buttonClassName = 'c-btn c-btn--primary';
+        break;
+
+      case 'galleria':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1170px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', 0);
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', (window.innerWidth <= 768 ? '60px' : '80px'));
+        this.style.setProperty('--ooo-instagram-external-gutter', '15px');
+
+        headingClassName = 'section-header-title';
+        subheadingClassName = 'section-header-subtitle rte-page';
+        buttonClassName = 'btn btn-primary btn-lg';
+        break;
+
+      case 'showtime':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1170px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', (window.innerWidth <= 768 ? '30px' : '42px'));
+        this.style.setProperty('--ooo-instagram-external-gutter', '15px');
+
+        headingClassName = 'section__title-text';
+        subheadingClassName = 'rte';
+        buttonClassName = 'btn_c';
+        break;
+
+      case 'expression':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1200px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', (window.innerWidth <= 768 ? '45px' : '60px'));
+        this.style.setProperty('--ooo-instagram-external-gutter', 0);
+
+        headingClassName = 'standard-title';
+        subheadingClassName = 'rte';
+        buttonClassName = 'btn btn--primary';
+        break;
+
+      case 'masonry':
+        this.style.setProperty('--ooo-instagram-container-max-width', 'none');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '80px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '20px' : '50px'));
+
+        headingClassName = 'h1';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button';
+        break;
+
+      case 'symmetry':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1200px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '80px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '20px' : '50px'));
+
+        headingClassName = 'h1';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button';
+        break;
+
+      case 'alchemy':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1200px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '80px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '15px' : '20px'));
+
+        headingClassName = 'h2';
+        subheadingClassName = 'rte align-center';
+        buttonClassName = 'button button--alt';
+        break;
+
+      case 'showcase':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1200px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '80px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '20px' : '50px'));
+
+        headingClassName = 'feature-header';
+        subheadingClassName = 'rte align-center';
+        buttonClassName = 'button';
+        break;
+
+      case 'canopy':
+        this.style.setProperty('--ooo-instagram-container-max-width', '90%');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '3.5em');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '15px' : '20px'));
+
+        headingClassName = 'section-heading';
+        subheadingClassName = 'rte';
+        buttonClassName = 'btn';
+        break;
+
+      case 'boost':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1400px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '30px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '20px' : '30px'));
+
+        headingClassName = 'small-title';
+        subheadingClassName = 'rte';
+        buttonClassName = 'btn btn--small btn--primary';
+        break;
+
+      case 'avenue':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1220px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', (window.innerWidth <= 768 ? '40px' : '60px'));
+        this.style.setProperty('--ooo-instagram-external-gutter', '20px');
+
+        headingClassName = '';
+        subheadingClassName = '';
+        buttonClassName = 'btn';
+        break;
+
+      case 'colors':
+        this.style.setProperty('--ooo-instagram-container-max-width', 'none');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '30px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '15px' : '30px'));
+
+        headingClassName = 'small-title';
+        subheadingClassName = 'rte';
+        buttonClassName = 'btn border';
+
+        // Colors is a bit special so we have to do specific processing
+        if (header) {
+          header.setAttribute('id', 'rte');
+          header.classList.add('center');
+        }
+
+        break;
+
+      case 'california':
+        this.style.setProperty('--ooo-instagram-container-max-width', 'none');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '30px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '0px');
+
+        headingClassName = '';
+        subheadingClassName = 'rte';
+        buttonClassName = 'btn action small';
+        break;
+
+      case 'atlantic':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1430px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', (window.innerWidth <= 768 ? '40px' : '65px'));
+        this.style.setProperty('--ooo-instagram-external-gutter', '15px');
+
+        headingClassName = 'section-title';
+        subheadingClassName = 'rte';
+        buttonClassName = 'action-button submit';
+        break;
+
+      case 'editions':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1400px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '30px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '0px');
+
+        headingClassName = 'accent-text';
+        subheadingClassName = 'rte';
+        buttonClassName = 'action-btn accent-text';
+        break;
+
+      case 'empire':
+        this.parentElement.classList.add('section-standard');
+        this.style.setProperty('--ooo-instagram-container-max-width', '1400px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '10px' : '25px'));
+
+        headingClassName = 'home-section--title';
+        subheadingClassName = 'rte-content';
+        buttonClassName = 'button-primary';
+        break;
+
+      case 'grid':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1400px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '40px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '30px');
+
+        headingClassName = 'home-section--title';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button';
+        break;
+
+      case 'handy':
+        this.style.setProperty('--ooo-instagram-container-max-width', 'none');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '0px');
+
+        headingClassName = 'section-twitter-title';
+        subheadingClassName = 'rte';
+        buttonClassName = 'pxs-image-with-text-button';
+        break;
+
+      case 'launch':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1215px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', (window.innerWidth <= 768 ? '30px' : '60px'));
+        this.style.setProperty('--ooo-instagram-external-gutter', '30px');
+
+        headingClassName = 'module-title';
+        subheadingClassName = 'module-subtitle';
+        buttonClassName = 'button outline';
+        break;
+
+      case 'pacific':
+        headingClassName = 'section-title';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button';
+        break;
+
+      case 'superstore':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1600px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', (window.innerWidth <= 768 ? '30px' : '50px'));
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '10px' : '40px'));
+        this.style.setProperty('--ooo-instagram-header-margin-bottom', (window.innerWidth <= 768 ? '1.64rem' : '2.625rem'));
+
+        headingClassName = 'home-section--title';
+        subheadingClassName = 'home-section--subheading';
+        buttonClassName = 'blogposts--footer-button button-primary';
+        break;
+
+      case 'reach':
+        this.style.setProperty('--ooo-instagram-container-max-width', '80rem');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', (window.innerWidth <= 768 ? '3rem' : '6rem'));
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '1rem' : '2rem'));
+
+        headingClassName = 'text-block-heading';
+        subheadingClassName = 'text-block-text rte';
+        buttonClassName = 'blog-posts-footer-link';
+        break;
+
+      case 'startup':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1020px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '50px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '1rem' : '30px'));
+
+        headingClassName = 'section-title';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button';
+        break;
+
+      case 'vogue':
+        this.style.setProperty('--ooo-instagram-container-max-width', 'none');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '50px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '0px');
+
+        headingClassName = 'section-title';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button';
+        break;
+
+      case 'palo alto':
+        this.style.setProperty('--ooo-instagram-container-max-width', 'none');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', '50px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '25px' : '50px'));
+
+        headingClassName = 'h2';
+        subheadingClassName = 'rte';
+        buttonClassName = 'btn btn--primary';
+        break;
+
+      case 'broadcast':
+        this.style.setProperty('--ooo-instagram-container-max-width', 'none');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', '50px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '25px' : '50px'));
+
+        headingClassName = 'h3';
+        subheadingClassName = 'rte';
+        buttonClassName = 'btn btn--large btn--secondary btn--neutral caps';
+        break;
+
+      case 'modular':
+        this.style.setProperty('--ooo-instagram-container-max-width', 'none');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', '50px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '25px' : '50px'));
+
+        headingClassName = 'h1';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button button--primary';
+        break;
+
+      case 'kingdom':
+        this.parentElement.classList.add('with-gutter');
+        this.style.setProperty('--ooo-instagram-container-max-width', 'none');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '25px' : '50px'));
+        this.style.setProperty('--ooo-instagram-header-text-alignment', 'left');
+
+        headingClassName = 'h1';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button button--solid';
+        break;
+
+      case 'artisan':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1220px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', (window.innerWidth <= 768 ? '30px' : '40px'));
+        this.style.setProperty('--ooo-instagram-external-gutter', '10px');
+
+        headingClassName = 'h2';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button';
+        break;
+
+      case 'flex':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1200px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', '40px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '10px');
+
+        headingClassName = 'title';
+        subheadingClassName = 'content';
+        buttonClassName = 'button button--primary';
+        break;
+
+      case 'mobilia':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1200px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', '40px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '10px');
+
+        headingClassName = 'title';
+        subheadingClassName = 'rte';
+        buttonClassName = 'action_button btn';
+        break;
+
+      case 'parallax':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1200px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', '40px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '10px');
+
+        headingClassName = 'title';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button';
+        break;
+
+      case 'responsive':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1180px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', '40px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '10px');
+
+        headingClassName = 'section-header home';
+        subheadingClassName = 'featured_text';
+        buttonClassName = 'button';
+
+        // This theme's button expand the full width, so we do a hotfix
+        if (button) {
+          button.style.width = 'auto';
+        }
+
+        break;
+
+      case 'retina':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1200px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', '40px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '10px');
+        this.style.setProperty('--ooo-instagram-header-text-alignment', 'left');
+
+        headingClassName = 'title';
+        subheadingClassName = 'rte';
+        buttonClassName = 'button';
+        break;
+
+      case 'turbo':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1200px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '0px');
+        this.style.setProperty('--ooo-instagram-section-vertical-padding', '40px');
+        this.style.setProperty('--ooo-instagram-external-gutter', '10px');
+
+        headingClassName = 'h2';
+        subheadingClassName = '';
+        buttonClassName = 'action_button';
+        break;
+
+      case 'providence':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1280px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '30px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '10px' : '20px'));
+
+        headingClassName = 'lhxt';
+        subheadingClassName = '';
+        buttonClassName = 'button';
+        break;
+
+      case 'lorenza':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1280px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '30px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '20px' : '30px'));
+
+        headingClassName = 'indexText-text';
+        subheadingClassName = 'indexText-subtext';
+        buttonClassName = 'button';
+        break;
+
+      case 'ira':
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '30px');
+
+        headingClassName = 'indexText-text';
+        subheadingClassName = 'indexText-subtext';
+        buttonClassName = 'btn';
+        break;
+
+      case 'context':
+        this.style.setProperty('--ooo-instagram-container-max-width', '1260px');
+        this.style.setProperty('--ooo-instagram-section-vertical-margin', '30px');
+        this.style.setProperty('--ooo-instagram-external-gutter', (window.innerWidth <= 768 ? '20px' : '40px'));
+
+        headingClassName = 'type-heading-1';
+        subheadingClassName = 'type-body-large rte';
+        buttonClassName = 'bttn';
+
+        // This theme's button expand the full width, so we do a hotfix
+        if (button) {
+          button.style.display = 'inline-flex';
+        }
+
+        break;
+    }
+
+    if (heading && headingClassName !== '') {
+      heading.className = headingClassName;
+    }
+
+    if (subheading && subheadingClassName !== '') {
+      subheading.className = subheadingClassName;
+    }
+
+    if (button && buttonClassName !== '') {
+      button.className = buttonClassName;
+    }
+  }
+
+  /**
+   * We use various strategies to detect a theme
+   */
+  async detectTheme() {
+    let response = await fetch(`${this.apiHost}/theme?shop=${Shopify.shop}&theme_id=${Shopify.theme.id}`);
+
+    if (!response.ok) {
+      return;
+    }
+
+    return response.json();
+  }
+}
+
+if (!window.customElements.get('ooo-instagram-feed')) {
+  window.customElements.define('ooo-instagram-feed', InstagramFeed);
+}
